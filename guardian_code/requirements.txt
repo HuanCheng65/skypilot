@@ -1,0 +1,11 @@
+# Common dependencies for the Guardian function
+requests
+fastapi
+
+# Cloud-specific dependencies (e.g., google-cloud-compute, boto3) will be
+# defined in separate files like 'requirements-gcp.txt' or
+# 'requirements-aws.txt' and will be automatically included by the
+# corresponding backend during the packaging process.
+
+# The SkyPilot library itself will be packaged directly from the local
+# installation, so it is not listed here. 

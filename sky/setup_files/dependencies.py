@@ -123,6 +123,13 @@ extras_require: Dict[str, List[str]] = {
     'gcp': [
         'google-api-python-client>=2.69.0',
         'google-cloud-storage',
+        'google-cloud-functions',
+        'google-cloud-scheduler',
+        'google-cloud-pubsub',
+        'google-cloud-iam',
+        'google-cloud-build',
+        'google-cloud-run',
+        'google-cloud-artifact-registry',
         # see https://github.com/conda/conda/issues/13619
         # see https://github.com/googleapis/google-api-python-client/issues/2554
         'pyopenssl >= 23.2.0, <24.3.0',

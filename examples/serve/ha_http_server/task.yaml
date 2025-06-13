@@ -1,0 +1,24 @@
+# SkyServe YAML to run a simple http server.
+#
+# Usage:
+#   sky serve up -n http examples/serve/ha_http_server/task.yaml
+# The endpoint will be printed in the console. You
+# could also check the endpoint by running:
+#   sky serve status --endpoint http
+
+service:
+  readiness_probe:
+    path: /health
+    initial_delay_seconds: 20
+  replicas: 2
+  high_availability:
+    type: cron
+    schedule: '*/1 * * * *' # Check every minute 
+
+resources:
+  ports: 8080
+  cpus: 2+
+
+workdir: examples/serve/ha_http_server
+
+run: python3 server.py

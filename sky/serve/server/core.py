@@ -4,7 +4,9 @@ import re
 import signal
 import tempfile
 import threading
+import traceback
 import typing
+import os
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import colorama
@@ -21,6 +23,9 @@ from sky.catalog import common as service_catalog_common
 from sky.serve import constants as serve_constants
 from sky.serve import serve_state
 from sky.serve import serve_utils
+from sky.serverless import data_models as serverless_data
+from sky.serverless import delete as serverless_delete
+from sky.serverless import deploy as serverless_deploy
 from sky.skylet import constants
 from sky.usage import usage_lib
 from sky.utils import admin_policy_utils
@@ -197,7 +202,7 @@ def up(
         # ports here. Or, we should have a nginx traffic control to refuse
         # any connection to the unregistered ports.
         controller_resources = {
-            r.copy(ports=[serve_constants.LOAD_BALANCER_PORT_RANGE])
+            r.copy(ports=[serve_constants.LOAD_BALANCER_PORT_RANGE, 9001])
             for r in controller_resources
         }
         controller_task.set_resources(controller_resources)
@@ -329,7 +334,67 @@ def up(
             '\n\n' +
             ux_utils.finishing_message('Service is spinning up and replicas '
                                        'will be ready shortly.'))
-        return service_name, endpoint
+
+    # Deploy the Guardian for High Availability if configured.
+    if task.service is not None and task.service.high_availability is not None:
+        ha_config = task.service.high_availability
+        
+        # This is the spinner that will actually be displayed
+        spinner_message = ux_utils.spinner_message(
+            f"Deploying High Availability Guardian for {service_name!r}")
+        
+        # We use the spinner's `update` method as our callback.
+        with rich_utils.safe_status(spinner_message) as status_spinner:
+            try:
+                guardian_code_path = str(
+                    pathlib.Path(sky.__file__).parent.parent / 'guardian_code')
+                
+                cloud = controller_handle.launched_resources.cloud
+                assert cloud is not None
+                region = controller_handle.launched_resources.region
+                assert region is not None
+
+                extra_reqs = []
+                platform_req_filename = f'requirements-{cloud.canonical_name()}.txt'
+                platform_req_path = os.path.join(guardian_code_path, platform_req_filename)
+                
+                if os.path.exists(platform_req_path):
+                    extra_reqs.append(platform_req_filename)
+
+                func = serverless_data.ServerlessFunction(
+                    name=f'guardian-{service_name}',
+                    code_path=guardian_code_path,
+                    entrypoint='main:app',
+                    env={
+                        'SKYPILOT_SERVICE_NAME': service_name,
+                        'SKYPILOT_SERVICE_ID': str(controller_job_id),
+                        'SKYPILOT_CLOUD': cloud.canonical_name(),
+                        'SKYPILOT_REGION': region,
+                    },
+                    runtime='python311',
+                    extra_requirements=extra_reqs,
+                    ingress='internal-only',
+                )
+                trigger = serverless_data.CronTrigger(schedule=ha_config.schedule)
+
+                # Pass the spinner's update method as the callback
+                serverless_deploy(func,
+                                  [trigger],
+                                  cloud=cloud,
+                                  region=region,
+                                  status_callback=status_spinner.update)
+            except Exception:
+                # The spinner stops automatically. The error will be logged by
+                # the re-raised exception's traceback.
+                logger.error(f'{colorama.Fore.RED}Failed to deploy High Availability '
+                             f'Guardian for {service_name!r}.\n  Traceback: {traceback.format_exc()}{colorama.Style.RESET_ALL}')
+            else:
+                # The spinner stops automatically. Log the final success message.
+                logger.info(
+                    f'{colorama.Fore.GREEN}High Availability Guardian for {service_name!r} '
+                    f'is deployed successfully.{colorama.Style.RESET_ALL}')
+
+    return service_name, endpoint
 
 
 @usage_lib.entrypoint
@@ -521,12 +586,26 @@ def down(
         service_names = []
     if isinstance(service_names, str):
         service_names = [service_names]
+    controller_name = common.SKY_SERVE_CONTROLLER_NAME
     handle = backend_utils.is_controller_accessible(
         controller=controller_utils.Controllers.SKY_SERVE_CONTROLLER,
         stopped_message='All services should have terminated.')
 
-    service_names_str = ','.join(service_names)
-    if sum([bool(service_names), all]) != 1:
+    if not all and not service_names:
+        raise ValueError(
+            'Either service_names or --all must be specified and not empty.')
+
+    service_names_to_down = service_names
+    if all:
+        # Get all service names
+        statuses = status()
+        service_names_to_down = [s['name'] for s in statuses]
+        if not service_names_to_down:
+            print('No services to down.')
+            return
+
+    service_names_str = ','.join(service_names_to_down)
+    if sum([bool(service_names_to_down), all]) != 1:
         argument_str = (f'service_names={service_names_str}'
                         if service_names else '')
         argument_str += ' all' if all else ''
@@ -555,6 +634,26 @@ def down(
                                            stdout)
     except exceptions.CommandError as e:
         raise RuntimeError(e.error_msg) from e
+
+    # Clean up the Guardian for High Availability if configured.
+    try:
+        # The handle is a `CloudVmRayResourceHandle`, which has `launched_resources`
+        # of type `sky.Resources`.
+        cloud = handle.launched_resources.cloud
+        region = handle.launched_resources.region
+        if cloud is not None and region is not None:
+            for service_name in service_names_to_down:
+                print(
+                    f'{colorama.Fore.YELLOW}Cleaning up High Availability Guardian for '
+                    f'{service_name!r}...{colorama.Style.RESET_ALL}')
+                serverless_delete(name=f'guardian-{service_name}',
+                                  cloud=cloud,
+                                  region=region)
+    except Exception:
+        # This is not critical, so we just log the error and move on.
+        logger.error(f'{colorama.Fore.RED}Failed to clean up High Availability '
+                     f'Guardian.{colorama.Style.RESET_ALL}')
+        traceback.print_exc()
 
     logger.info(stdout)
 

@@ -1,0 +1,5 @@
+# GCP-specific dependencies for the Guardian function.
+google-cloud-compute
+google-cloud-storage
+google-api-python-client
+google-auth

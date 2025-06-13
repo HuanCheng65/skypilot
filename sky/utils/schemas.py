@@ -540,6 +540,20 @@ def get_service_schema():
                     },
                 },
             },
+            'high_availability': {
+                'type': 'object',
+                'required': ['type'],
+                'additionalProperties': False,
+                'properties': {
+                    'type': {
+                        'type': 'string',
+                        'case_insensitive_enum': ['cron'],
+                    },
+                    'schedule': {
+                        'type': 'string',
+                    },
+                },
+            },
         }
     }
 

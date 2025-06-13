@@ -4,6 +4,13 @@ Responsible for autoscaling and replica management.
 """
 import contextlib
 import logging
+# 新增的 imports
+import os
+import subprocess
+import sys
+import atexit
+import filelock
+
 import threading
 import time
 import traceback
@@ -25,6 +32,8 @@ from sky.utils import ux_utils
 
 logger = sky_logging.init_logger(__name__)
 
+# 定义一个全局的 flag 防止重复启动 Daemon
+DAEMON_STARTED_FLAG = os.path.join(os.path.expanduser('~/.sky/serve_daemon_started_flag'))
 
 class SuppressSuccessGetAccessLogsFilter(logging.Filter):
 
@@ -61,6 +70,55 @@ class SkyServeController:
         for handler in uvicorn_access_logger.handlers:
             handler.setFormatter(sky_logging.FORMATTER)
         yield
+    
+    def _start_independent_daemon_if_needed(self):
+        """如果需要，通过一个发射器脚本来启动一个完全独立的守护进程。"""
+        lock_path = DAEMON_STARTED_FLAG + '.lock'
+        daemon_lock = filelock.FileLock(lock_path)
+        
+        with daemon_lock:
+            if os.path.exists(DAEMON_STARTED_FLAG):
+                return
+
+            logger.info('First run detected. Launching the launcher for HA Daemon...')
+            
+            service_record = serve_state.get_service_from_name(self._service_name)
+            if not service_record:
+                logger.error('Failed to get service record to start HA Daemon.')
+                return
+            controller_job_id = service_record['controller_job_id']
+
+            # 这是我们要让守护进程最终执行的命令
+            daemon_target_args = [
+                sys.executable,  # python解释器
+                '-m', 'sky.serve.ha_daemon',
+                '--service-name', self._service_name,
+                '--task-yaml', self._replica_manager.service_task_yaml_path,
+                '--job-id', str(controller_job_id),
+                '--controller-port', str(self._port),
+                '--daemon-port', '9001'
+            ]
+
+            # 这是我们实际执行的命令：调用发射器，并把目标命令作为参数传给它
+            launcher_command = [
+                sys.executable, '-m', 'sky.serve.launch_daemon',
+                *daemon_target_args
+            ]
+            
+            # 这里不再需要 Popen，因为发射器脚本的父进程会立刻退出
+            # 我们用 run 并忽略输出来执行它
+            subprocess.run(launcher_command, check=False, capture_output=True)
+            
+            with open(DAEMON_STARTED_FLAG, 'w') as f:
+                f.write(str(os.getpid()))
+
+            def cleanup_flag():
+                if os.path.exists(DAEMON_STARTED_FLAG): os.remove(DAEMON_STARTED_FLAG)
+                if os.path.exists(lock_path): os.remove(lock_path)
+            
+            atexit.register(cleanup_flag)
+
+            logger.info('HA Daemon launcher has been executed.')
 
     def _run_autoscaler(self):
         logger.info('Starting autoscaler.')
@@ -99,6 +157,8 @@ class SkyServeController:
             time.sleep(self._autoscaler.get_decision_interval())
 
     def run(self) -> None:
+        # 在 run 方法的最开始调用
+        self._start_independent_daemon_if_needed()
 
         @self._app.post('/controller/load_balancer_sync')
         async def load_balancer_sync(
@@ -114,6 +174,12 @@ class SkyServeController:
                 'ready_replica_urls':
                     self._replica_manager.get_active_replica_urls()
             },
+                                          status_code=200)
+
+        @self._app.get('/controller/healthz')
+        async def healthz() -> fastapi.Response:
+            """Health check endpoint for the controller."""
+            return responses.JSONResponse(content={'message': 'ok'},
                                           status_code=200)
 
         @self._app.post('/controller/update_service')

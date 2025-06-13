@@ -4,6 +4,7 @@ import os
 import textwrap
 import typing
 from typing import Any, Dict, List, Optional
+import dataclasses
 
 from sky import serve
 from sky.adaptors import common as adaptors_common
@@ -20,6 +21,24 @@ if typing.TYPE_CHECKING:
 else:
     yaml = adaptors_common.LazyImport('yaml')
 
+
+@dataclasses.dataclass
+class HighAvailabilityConfig:
+    """High availability configuration.
+
+    Attributes:
+        type: The type of the HA trigger. Currently only 'cron' is supported.
+        schedule: The cron schedule for the health check.
+    """
+    type: str
+    schedule: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'HighAvailabilityConfig':
+        return cls(**d)
 
 class SkyServiceSpec:
     """SkyServe service specification."""
@@ -43,6 +62,7 @@ class SkyServiceSpec:
         upscale_delay_seconds: Optional[int] = None,
         downscale_delay_seconds: Optional[int] = None,
         load_balancing_policy: Optional[str] = None,
+        high_availability: Optional[HighAvailabilityConfig] = None,
     ) -> None:
         if max_replicas is not None and max_replicas < min_replicas:
             with ux_utils.print_exception_no_traceback():
@@ -102,6 +122,8 @@ class SkyServiceSpec:
             self.dynamic_ondemand_fallback) or (
                 self.base_ondemand_fallback_replicas is not None and
                 self.base_ondemand_fallback_replicas > 0)
+        self._high_availability: Optional[
+            HighAvailabilityConfig] = high_availability
 
     @staticmethod
     def from_yaml_config(config: Dict[str, Any]) -> 'SkyServiceSpec':
@@ -200,6 +222,11 @@ class SkyServiceSpec:
                 certfile=tls_section.get('certfile', None),
             )
 
+        ha_section = config.get('high_availability', None)
+        if ha_section is not None:
+            service_config['high_availability'] = HighAvailabilityConfig.from_dict(
+                ha_section)
+
         return SkyServiceSpec(**service_config)
 
     @staticmethod
@@ -267,6 +294,9 @@ class SkyServiceSpec:
         if self.tls_credential is not None:
             add_if_not_none('tls', 'keyfile', self.tls_credential.keyfile)
             add_if_not_none('tls', 'certfile', self.tls_credential.certfile)
+        if self.high_availability is not None:
+            add_if_not_none('high_availability', None,
+                            self.high_availability.to_dict())
         return config
 
     def probe_str(self):
@@ -331,6 +361,11 @@ class SkyServiceSpec:
         return (f'Keyfile: {self.tls_credential.keyfile}, '
                 f'Certfile: {self.tls_credential.certfile}')
 
+    def high_availability_str(self):
+        if self.high_availability is None:
+            return 'No High Availability'
+        return f'{self.high_availability.type} with schedule {self.high_availability.schedule}'
+
     def __repr__(self) -> str:
         return textwrap.dedent(f"""\
             Readiness probe method:           {self.probe_str()}
@@ -340,6 +375,7 @@ class SkyServiceSpec:
             TLS Certificates:                 {self.tls_str()}
             Spot Policy:                      {self.spot_policy_str()}
             Load Balancing Policy:            {self.load_balancing_policy}
+            High Availability:                {self.high_availability_str()}
         """)
 
     @property
@@ -420,3 +456,7 @@ class SkyServiceSpec:
     def load_balancing_policy(self) -> str:
         return lb_policies.LoadBalancingPolicy.make_policy_name(
             self._load_balancing_policy)
+
+    @property
+    def high_availability(self) -> Optional[HighAvailabilityConfig]:
+        return self._high_availability
